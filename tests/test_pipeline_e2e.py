@@ -2,7 +2,9 @@
 import json
 from pathlib import Path
 
+from paper2pod import cli
 from paper2pod.cli import main
+from paper2pod.errors import MissingDependency, TransientError
 from paper2pod.jobs import JobRunner, JobStatus, JobStore
 from paper2pod.models import PodcastRequest, Script
 from paper2pod.runtime import build_pipeline
@@ -55,3 +57,53 @@ def test_cli_demo(tmp_path, capsys):
     out = capsys.readouterr().out
     summary = json.loads(out[out.index("{"):])
     assert summary["grounding_score"] == 1.0 and Path(summary["audio"]).is_file()
+
+
+def test_cli_marks_the_job_running_while_the_pipeline_works(tmp_path, monkeypatch, capsys):
+    seen = {}
+    real_build = cli.build_pipeline
+
+    def spy_build(settings, offline=False):
+        pipeline = real_build(settings, offline=offline)
+        real_run = pipeline.run
+
+        def spy_run(request, workdir, progress=None, check_cancel=None):
+            seen["status"] = json.loads((Path(workdir) / "job.json").read_text())["status"]
+            return real_run(request, workdir, progress=progress, check_cancel=check_cancel)
+
+        pipeline.run = spy_run
+        return pipeline
+
+    monkeypatch.setattr(cli, "build_pipeline", spy_build)
+    assert main(["--data-dir", str(tmp_path), "demo", "--minutes", "2"]) == 0
+    assert seen["status"] == "running"
+    job_files = list((tmp_path / "jobs").glob("*/job.json"))
+    assert json.loads(job_files[0].read_text())["status"] == "succeeded"
+
+
+def test_cli_records_a_value_error_as_a_failed_job(tmp_path, monkeypatch, capsys):
+    class BrokenPipeline:
+        def run(self, request, workdir, progress=None, check_cancel=None):
+            raise ValueError("unknown voice 'robot' for Alex")
+
+    monkeypatch.setattr(cli, "build_pipeline", lambda settings, offline=False: BrokenPipeline())
+    assert main(["--data-dir", str(tmp_path), "demo", "--minutes", "2"]) == 1
+    job = json.loads(next((tmp_path / "jobs").glob("*/job.json")).read_text())
+    assert job["status"] == "failed" and "robot" in job["error"]
+
+
+def test_cli_reports_package_errors_without_a_traceback(tmp_path, monkeypatch, capsys):
+    class DownSource:
+        def search(self, query, max_results=5):
+            raise TransientError("network error: arXiv is down")
+
+    monkeypatch.setattr(cli, "build_source", lambda settings, offline=False: DownSource())
+    assert main(["--data-dir", str(tmp_path), "search", "graph transformers"]) == 1
+    assert "arXiv is down" in capsys.readouterr().err
+
+    def missing_extra(settings, offline=False):
+        raise MissingDependency("openai", "openai")
+
+    monkeypatch.setattr(cli, "build_pipeline", missing_extra)
+    assert main(["--data-dir", str(tmp_path), "demo"]) == 1
+    assert 'pip install "paper2pod[openai]"' in capsys.readouterr().err

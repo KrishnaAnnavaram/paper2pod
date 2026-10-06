@@ -35,13 +35,14 @@ def _run_job(settings: Settings, request: PodcastRequest, offline: bool) -> int:
         print(f"[{percent:3d}%] {stage:<8} {message}", flush=True)
 
     print(f"job {job.id} -> {store.workdir(job.id)}")
+    store.update(job.id, status=JobStatus.RUNNING, stage="starting", message="Starting")
     try:
         result = pipeline.run(request, store.workdir(job.id), progress=progress)
     except KeyboardInterrupt:
         store.update(job.id, status=JobStatus.CANCELLED)
         print("cancelled", file=sys.stderr)
         return 130
-    except Paper2PodError as exc:
+    except (Paper2PodError, ValueError) as exc:  # ValueError: e.g. an unknown voice name
         store.update(job.id, status=JobStatus.FAILED, error=str(exc))
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -135,6 +136,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except Paper2PodError as exc:  # e.g. a missing extra, or a search that fails after its retries
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
