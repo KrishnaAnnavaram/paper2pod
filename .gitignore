@@ -1,0 +1,27 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime output: downloaded papers, scripts, audio (never commit)
+data/
+downloads/
+output/
+*.pdf
+*.mp3
+*.wav
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.streamlit/secrets.toml

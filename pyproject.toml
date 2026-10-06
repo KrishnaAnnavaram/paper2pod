@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper2pod"
+version = "0.1.0"
+description = "Turn arXiv papers into multi-voice podcasts with AI agents"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Krishna Annavaram" }]
+requires-python = ">=3.10"
+# The core pipeline only needs the standard library; everything heavy is an extra.
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.40"]
+pdf = ["pymupdf>=1.24"]
+pdf-lite = ["pypdf>=4.0"]
+mp3 = ["pydub>=0.25"]                       # also needs FFmpeg on PATH
+fast = ["numpy>=1.26"]                      # faster loudness normalisation
+api = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2.5"]
+ui = ["streamlit>=1.37"]
+dotenv = ["python-dotenv>=1.0"]
+all = ["paper2pod[openai,pdf,mp3,fast,api,ui,dotenv]"]
+dev = ["pytest>=8", "fastapi>=0.110", "httpx>=0.27", "pydantic>=2.5", "ruff"]
+
+[project.scripts]
+paper2pod = "paper2pod.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+paper2pod = ["prompts/*.txt", "demo/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110

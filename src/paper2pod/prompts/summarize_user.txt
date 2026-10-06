@@ -1,0 +1,9 @@
+Paper: $paper_title
+Part: $section_title
+
+<section>
+$text
+</section>
+
+Summarise this part of the paper in at most $max_words words and list 3 to 6 key points.
+Copy numbers exactly as written. Return JSON with "summary" and "key_points".

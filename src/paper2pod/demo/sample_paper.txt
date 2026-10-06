@@ -1,0 +1,57 @@
+Tiny Recurrent Gardens: A Synthetic Paper for Offline Demos
+Ada Example, Ben Placeholder
+
+Abstract
+This is a short, fictional paper written only to exercise the paper2pod pipeline without network
+access. It describes Tiny Recurrent Gardens (TRG), an imaginary method that grows a small recurrent
+network one cell at a time. On a toy benchmark of 1,000 synthetic sequences, TRG reaches 91.5%
+accuracy while using 40% fewer parameters than a fixed-size baseline. None of these results are real.
+
+1 Introduction
+Recurrent networks are often sized by guesswork. Practitioners pick a hidden size, train, and hope
+the choice was reasonable. If the network is too small it underfits; if it is too large it wastes
+memory and overfits short datasets. In this paper we ask a simple question: can a network decide its
+own size while it trains? We answer it with a deliberately small idea. TRG starts with four hidden
+cells and adds a new cell whenever the validation loss stops improving for three consecutive epochs.
+Cells that receive almost no gradient are pruned. The result is a model that grows where the data
+needs capacity and stays small elsewhere.
+
+2 Related Work
+Growing networks have a long history, from constructive cascade methods to modern neural
+architecture search (NAS). Pruning methods such as magnitude pruning remove weights after training.
+TRG combines both directions inside one training loop, but it is far simpler than NAS: it never
+trains more than one candidate model at a time.
+
+3 Method
+3.1 Growth Rule
+Every epoch we record the validation loss. When it has not improved by at least 0.5% for three
+epochs, TRG adds one hidden cell. The new cell is initialised with small random weights so that the
+existing function of the network is barely disturbed.
+
+3.2 Pruning Rule
+After each epoch we measure the average gradient norm that reached each cell. Cells below 1% of the
+median norm are removed. Pruning and growth are never applied in the same epoch, which keeps the
+training curve stable.
+
+4 Experiments
+We evaluate on a toy benchmark of 1,000 synthetic sequences of length 50, split 800 for training and
+200 for testing. The fixed-size baseline uses 64 hidden cells. TRG ends training with 38 cells on
+average across 5 random seeds. It reaches 91.5% test accuracy against 90.8% for the baseline, using
+40% fewer parameters. Training time is roughly the same because the growth checks are cheap.
+
+5 Discussion and Limitations
+The benchmark is tiny and synthetic, so these numbers say nothing about real tasks. The growth rule
+depends on a patience value of three epochs, and a different patience could change the final size.
+We also did not test TRG on long sequences, where recurrent models are known to struggle.
+
+6 Conclusion
+TRG shows that a recurrent network can choose its own size with two simple rules: grow when progress
+stalls and prune what is unused. The idea is easy to implement and easy to explain, which is exactly
+why it makes a good demo paper.
+
+References
+[1] A. Example. A made-up reference that the parser should drop. 2020.
+[2] B. Placeholder. Another invented citation. 2021.
+
+Appendix A Extra Tables
+This appendix should also be dropped before the script is written.

@@ -1,0 +1,15 @@
+Podcast about: $paper_title
+Speakers: $speakers
+Segment $index of $count: $segment_title ($kind)
+Target length: $target_words words in total across all turns (acceptable range $low to $high).
+$position_note
+
+<notes>
+$notes
+</notes>
+
+<previous>
+$previous
+</previous>
+$feedback
+Return JSON: {"turns": [{"speaker": "<a speaker name>", "text": "...", "direction": null}]}
