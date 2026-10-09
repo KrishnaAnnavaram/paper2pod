@@ -71,6 +71,7 @@ This README is the **one location that explains all of paper2pod**. It gives the
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one job](#42-the-life-cycle-of-one-job)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The fetch stage](#5-the-fetch-stage)
 6. 🟢 [The parse stage](#6-the-parse-stage)
 7. 🟣 [The outline stage](#7-the-outline-stage)
@@ -152,6 +153,50 @@ flowchart LR
 | HTTP API | `src/paper2pod/api.py` | The FastAPI job service |
 | Streamlit UI | `src/paper2pod/ui/streamlit_app.py` | Search, chat and job panels in a browser |
 | Chat session | `src/paper2pod/chat.py` | Rule-based intents and a bounded memory for each session |
+
+The component map shows which component calls which component.
+
+```mermaid
+flowchart LR
+    subgraph FE["Front-ends"]
+        CLI["cli.py"]
+        API["api.py"]
+        UI["streamlit_app.py"]
+        CHAT["chat.py"]
+    end
+    RT["runtime.py<br/>build_pipeline, build_runner"]
+    CFG["config.py<br/>Settings"]
+    JOBS["jobs.py<br/>JobRunner, JobStore"]
+    PIPE["pipeline.py<br/>7 stages"]
+    FAC["services/factory.py"]
+    SRC["sources/<br/>ArxivClient, LocalPaperSource"]
+    PAR["parsing/<br/>pdf, cleaning, sections"]
+    SCR["script/<br/>outline, budget, generate"]
+    QUA["quality/<br/>length, format, factuality, readability"]
+    AUD["audio/<br/>voices, text, mix"]
+    ADP["services/<br/>OpenAILLM, OpenAITTS, fakes"]
+    RET["retry.py<br/>with_retries"]
+    CLI --> RT
+    API --> RT
+    UI --> RT
+    UI --> CHAT
+    CHAT --> JOBS
+    RT --> CFG
+    RT --> FAC
+    RT --> JOBS
+    JOBS --> PIPE
+    CLI --> PIPE
+    FAC --> SRC
+    FAC --> ADP
+    PIPE --> SRC
+    PIPE --> PAR
+    PIPE --> SCR
+    PIPE --> QUA
+    PIPE --> AUD
+    SCR --> ADP
+    SRC --> RET
+    ADP --> RET
+```
 
 ### 2.2 System context
 
@@ -240,6 +285,17 @@ but no paper text and no script text.
 Only a `TransientError` causes a retry: HTTP 429, HTTP 5xx, a timeout or a connection error.
 All other errors stop the job at once.
 
+```mermaid
+flowchart LR
+    C["with_retries(fn)<br/>attempts = PAPER2POD_MAX_RETRIES"] --> CALL["Call fn"]
+    CALL -- "success" --> OK[/"Result"/]
+    CALL -- "TransientError<br/>429, 5xx, timeout, connection" --> LAST{"Last attempt?"}
+    LAST -- "yes" --> RAISE[/"Raise the error,<br/>the job fails"/]
+    LAST -- "no" --> W["Wait 1 s x 2^n,<br/>maximum 30 s, + up to 10 % jitter"]
+    W --> CALL
+    CALL -- "other error" --> STOP[/"Raise at once"/]
+```
+
 ---
 
 ## 4. The end-to-end workflow
@@ -247,38 +303,64 @@ All other errors stop the job at once.
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    subgraph FE["Front-ends"]
-        CLI["CLI: paper2pod make / demo / search"]
-        API["HTTP API: POST /jobs"]
-        UI["Streamlit UI"]
-        CHAT["Chat session"]
-    end
-    CLI --> PIPE
-    API --> RUN["JobRunner: thread pool"]
-    UI --> RUN
-    CHAT --> RUN
-    RUN --> PIPE["Pipeline.run()"]
-    RUN --> STORE["JobStore: one job.json for each job"]
-    subgraph PIPE_STAGES["Pipeline stages"]
-        F["fetch: resolve and download"] --> P["parse: clean, split, drop back matter"]
-        P --> O["outline: summarize each group"]
-        O --> S["script: write segments on a word budget"]
-        S --> V["validate: length, format, grounding, readability"]
-        V --> T["tts: chunk, synthesize, cache"]
-        T --> M["mix: normalize, pause, chapters, WAV"]
-    end
-    PIPE --> F
-    M --> FILES["job directory: podcast.wav, script.json, chapters.json, metrics.json"]
-    LLMA["LLM adapter: OpenAILLM or FakeLLM"] -.-> O
+flowchart TD
+    Q[/"Search query"/] --> SR["ArxivClient.search<br/>CLI, UI or chat"]
+    SR --> SEL{{"HUMAN<br/>User selects a paper<br/>from the results"}}
+    REF[/"Paper reference, minutes 2 to 60,<br/>2 to 4 speakers"/] --> REQ["PodcastRequest.validate"]
+    SEL --> REQ
+    REQ --> FE{"Front-end"}
+    FE -- "CLI make or demo" --> PIPE
+    FE -- "HTTP API, UI, chat" --> RUN["JobRunner.submit<br/>thread pool"]
+    RUN --> STORE[("JobStore<br/>data/jobs/job_id/job.json")]
+    RUN --> PIPE["Pipeline.run"]
+    PIPE --> F["fetch<br/>resolve, download, extract"]
+    CACHE[("data/cache<br/>meta, pdf, tts")] <--> F
+    F --> P["parse<br/>clean, split, drop back matter"]
+    P --> O["outline<br/>summarize each group"]
+    O --> S["script<br/>segments on a word budget"]
+    S --> V["validate<br/>format, grounding, readability"]
+    V --> T["tts<br/>chunk, synthesize, cache"]
+    T <--> CACHE
+    T --> M["mix<br/>loudness, pauses, chapters, WAV"]
+    LLMA["LLM adapter<br/>OpenAILLM or FakeLLM"] -.-> O
     LLMA -.-> S
-    TTSA["TTS adapter: OpenAITTS or FakeTTS"] -.-> T
+    TTSA["TTS adapter<br/>OpenAITTS or FakeTTS"] -.-> T
+    M --> OUT[/"podcast.wav, script.json,<br/>chapters.json, metrics.json"/]
+    OUT --> REV{{"HUMAN<br/>Listen and read metrics.json<br/>before you publish"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class SEL,REV human
 ```
 
 The CLI runs the pipeline in its own process and does not use the job runner. The HTTP API, the
 Streamlit UI and the chat session submit jobs to the job runner and poll the job store.
 
 ### 4.2 The life cycle of one job
+
+The diagram uses the real `JobStatus` values and the real stage names of `Pipeline.run`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: JobStore.create writes job.json
+    queued --> cancelled: cancel before start
+    queued --> running: thread starts, stage starting
+    state running {
+        [*] --> fetch
+        fetch --> parse
+        parse --> outline
+        outline --> script
+        script --> validate
+        validate --> tts
+        tts --> mix
+        mix --> [*]
+    }
+    running --> succeeded: all 7 stages done, outputs recorded
+    running --> failed: Paper2PodError or other error
+    running --> cancelled: check_cancel raises JobCancelled
+    succeeded --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
 
 1. A front-end makes a `PodcastRequest` and calls `validate()`. The request needs a paper reference, 2 to 60 minutes and 2 to 4 unique speaker names.
 2. The job store makes the job directory and writes `job.json` with the status `queued`.
@@ -295,6 +377,50 @@ Streamlit UI and the chat session submit jobs to the job runner and poll the job
 Before each stage, segment, outline chunk and TTS turn, the pipeline calls `check_cancel()`. A cancel
 request stops the job at the next of these points.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant API as HTTP API
+    participant RUN as JobRunner
+    participant ST as JobStore
+    participant P as Pipeline
+    participant AX as ArxivClient
+    participant L as LLM adapter
+    participant T as TTS adapter
+
+    U->>API: POST /jobs with paper, minutes, speakers
+    API->>RUN: submit(PodcastRequest)
+    RUN->>ST: create, job.json status queued
+    API-->>U: 202 and the job
+    RUN->>ST: update status running
+    RUN->>P: run(request, workdir, progress, check_cancel)
+    P->>AX: resolve, then fetch_fulltext
+    AX-->>P: Paper and raw text, paper.pdf
+    P->>P: paper_sections
+    loop each group and each chunk
+        P->>L: complete_json summarize_section
+    end
+    loop each segment
+        P->>L: complete_json write_segment
+        L-->>P: JSON turns, or truncated
+    end
+    P->>P: check_format, check_grounding, readability
+    loop each turn and each chunk
+        P->>T: synthesize, unless data/cache/tts has the chunk
+    end
+    P->>P: mix_clips, write_wav, check_length
+    P-->>RUN: outputs and metrics
+    RUN->>ST: update status succeeded
+    U->>API: GET /jobs/job_id
+    API->>ST: get
+    API-->>U: status, stage, progress, outputs
+    U->>API: GET /jobs/job_id/audio
+    API-->>U: podcast.wav or podcast.mp3
+```
+
 ---
 
 ## 5. The fetch stage
@@ -305,6 +431,32 @@ request stops the job at the next of these points.
 |---|---|
 | A paper reference, or `demo` for the sample paper | A `Paper` object (`arxiv_id`, `title`, `authors`, `abstract`, `pdf_url`, `published`) and the raw text |
 | The cache in `data/cache/meta/` and `data/cache/pdf/` | `paper.json` and `paper.pdf` in the job directory |
+
+```mermaid
+flowchart TD
+    R[/"Paper reference"/] --> ID{"find_arxiv_id:<br/>ID found?"}
+    ID -- "no" --> NF[/"PaperNotFound"/]
+    ID -- "yes" --> MC{"data/cache/meta/id.json<br/>exists?"}
+    MC -- "yes" --> META["Read the cached metadata"]
+    MC -- "no" --> API["GET export.arxiv.org/api/query<br/>id_list, 3 s interval, retries"]
+    API --> ATOM["parse_atom_feed"]
+    ATOM --> EMPTY{"Any paper?"}
+    EMPTY -- "no" --> NF
+    EMPTY -- "yes" --> SAVE[("Save to data/cache/meta")]
+    SAVE --> META
+    META --> PC{"data/cache/pdf/id.pdf<br/>exists?"}
+    PC -- "no" --> DL["Download the PDF"]
+    DL --> PDF{"Starts with %PDF?"}
+    PDF -- "no" --> NF
+    PDF -- "yes" --> CP[("Save to data/cache/pdf<br/>through a .part file")]
+    CP --> COPY["Copy to paper.pdf<br/>in the job directory"]
+    PC -- "yes" --> COPY
+    COPY --> EX{"PyMuPDF installed?"}
+    EX -- "yes" --> MU["order_blocks, then the text<br/>in column sequence"]
+    EX -- "no" --> PY["pypdf text"]
+    MU --> OUT[/"Paper and raw text,<br/>paper.json"/]
+    PY --> OUT
+```
 
 **Procedure** (`ArxivClient` in `sources/arxiv.py`)
 
@@ -342,6 +494,19 @@ request stops the job at the next of these points.
 | The raw text of the paper | A list of `Section` objects (title and text) |
 | | `sections.json` (title and word count of each section) |
 
+```mermaid
+flowchart LR
+    RAW[/"Raw text"/] --> CL["clean_text<br/>NFKC, join hyphen breaks,<br/>remove page numbers and arXiv stamp"]
+    CL --> SP["split_sections<br/>detect_heading on each line"]
+    SP --> FM["Text before the first heading<br/>becomes Front matter"]
+    FM --> BM["drop_back_matter<br/>stop at References or Bibliography,<br/>skip other back matter"]
+    BM --> UW["unwrap_lines<br/>join hard-wrapped lines"]
+    UW --> MW{"15 words or more?"}
+    MW -- "no" --> DROP["Remove the section"]
+    MW -- "yes" --> OUT[/"Section list,<br/>sections.json"/]
+    OUT --> AB["Use the Abstract section if<br/>the metadata has no abstract"]
+```
+
 **Procedure** (`paper_sections()` in `parsing/sections.py`)
 
 1. Apply NFKC normalization. This changes ligatures such as `ﬁ` into `fi`.
@@ -373,6 +538,25 @@ request stops the job at the next of these points.
 | The paper and its sections | A list of up to 8 `OutlineItem` objects (title, summary, key points, weight) |
 | The LLM | `outline.json` |
 
+```mermaid
+flowchart TD
+    IN[/"Paper and sections"/] --> BODY["Remove Abstract and Front matter"]
+    BODY --> GRP["Add each section to the group before it<br/>while that group has fewer than 120 words"]
+    GRP --> MAX{"More than 8 groups?"}
+    MAX -- "yes" --> MRG["Merge the adjacent pair<br/>with the fewest words"]
+    MRG --> MAX
+    MAX -- "no" --> ANY{"Any group?"}
+    ANY -- "no" --> ABS{"Abstract?"}
+    ABS -- "no" --> ERR[/"ValueError: no usable text"/]
+    ABS -- "yes" --> OV["One group: Overview"]
+    ANY -- "yes" --> CH["chunk_text<br/>12,000 characters at sentence ends"]
+    OV --> CH
+    CH --> LLM["complete_json summarize_section<br/>SUMMARY_SCHEMA, 900 tokens"]
+    LLM --> JOIN["Join the summaries,<br/>first 8 key points"]
+    JOIN --> W["Weight = square root<br/>of the word count"]
+    W --> OUT[/"OutlineItem list,<br/>outline.json"/]
+```
+
 **Procedure** (`build_outline()` in `script/outline.py`)
 
 1. Remove the `Abstract` and `Front matter` sections from the list.
@@ -403,6 +587,21 @@ request stops the job at the next of these points.
 
 **Procedure: plan the segments** (`plan_segments()` in `script/budget.py`)
 
+```mermaid
+flowchart TD
+    IN[/"Outline, minutes,<br/>words per minute"/] --> TOT["Word budget<br/>round(minutes x words_per_minute)"]
+    TOT --> IO["Opening 8 %, wrap-up 7 %,<br/>minimum 40 words each"]
+    IO --> KEEP{"More outline items than<br/>body words / 80?"}
+    KEEP -- "yes" --> HEAVY["Keep the heaviest items,<br/>in paper order"]
+    KEEP -- "no" --> SHARE
+    HEAVY --> SHARE["Body: 70 % by weight, 30 % equal,<br/>largest-remainder rounding"]
+    SHARE --> SPLIT{"Segment longer than<br/>PAPER2POD_MAX_SEGMENT_WORDS?"}
+    SPLIT -- "yes" --> PARTS["Split into equal parts,<br/>part 1 of N"]
+    SPLIT -- "no" --> TOK
+    PARTS --> TOK["Token limit<br/>ceil(words x 1.45 x 1.6) + 250,<br/>maximum 16,000"]
+    TOK --> OUT[/"SegmentPlan list:<br/>intro, body, outro"/]
+```
+
 1. Calculate the word budget: `round(minutes × words_per_minute)`.
 2. Give the opening 8 % and the wrap-up 7 % of the budget, with a minimum of 40 words each.
 3. If the body budget is too small for all outline items, keep the heaviest items. The maximum is one item for each 80 body words.
@@ -411,6 +610,30 @@ request stops the job at the next of these points.
 6. Give each segment a token limit: `ceil(words × 1.45 × 1.6) + 250`, with a maximum of 16,000.
 
 **Procedure: write one segment** (`ScriptWriter.write_segment()` in `script/generate.py`)
+
+```mermaid
+flowchart TD
+    IN[/"SegmentPlan, speakers,<br/>last 3 turns"/] --> RNG["Range low to high<br/>target x (1 +/- tolerance)"]
+    RNG --> ATT{"Attempts left?<br/>1 + PAPER2POD_MAX_REGENERATIONS"}
+    ATT -- "yes" --> CALL["complete_json write_segment<br/>SEGMENT_SCHEMA"]
+    CALL --> TR{"Truncated?"}
+    TR -- "yes" --> GROW["Token limit x 1.5,<br/>feedback: close the JSON"]
+    GROW --> ATT
+    TR -- "no" --> PT{"parse_turns valid?"}
+    PT -- "no" --> FB1["Feedback: use only<br/>the speaker names"]
+    FB1 --> ATT
+    PT -- "yes" --> BEST["Keep the answer nearest<br/>to the target"]
+    BEST --> IN2{"Word count<br/>in the range?"}
+    IN2 -- "no" --> FB2["Feedback: longer or shorter"]
+    FB2 --> ATT
+    IN2 -- "yes" --> HAS
+    ATT -- "no" --> HAS{"Best answer exists?"}
+    HAS -- "no" --> SFE[/"ScriptFormatError"/]
+    HAS -- "yes" --> LONG{"More than high words?"}
+    LONG -- "yes" --> TRIM["trim_turns<br/>at a sentence end"]
+    LONG -- "no" --> OUT
+    TRIM --> OUT[/"Turns and SegmentReport"/]
+```
 
 1. Calculate the range: `low = floor(target × (1 − tolerance))` and `high = ceil(target × (1 + tolerance))`.
 2. Send the segment prompt to the LLM with the task `write_segment`. The prompt contains the notes, the speakers and the last 3 turns, each cut to 80 words.
@@ -440,6 +663,26 @@ request stops the job at the next of these points.
 | The script | `format_issues` (a list of text messages) |
 | The paper text (title, abstract and sections) | `grounding` (score and unsupported sentences) and `readability` |
 
+```mermaid
+flowchart LR
+    S[/"Script"/] --> CF["check_format<br/>monologue, same speaker,<br/>markup, label, silent speaker"]
+    S --> CG["check_grounding"]
+    PT[/"Title, abstract, sections"/] --> CG
+    CG --> SEN["For each sentence: numbers<br/>and all-capital acronyms"]
+    SEN --> SKIP{"Any number 10 or more,<br/>or an acronym?"}
+    SKIP -- "no" --> NEXT["Not checked"]
+    SKIP -- "yes" --> IN{"All in the paper text?"}
+    IN -- "yes" --> SUP["Supported"]
+    IN -- "no" --> UNS["Unsupported,<br/>with the missing tokens"]
+    S --> RD["readability<br/>Flesch, sentence length, jargon rate"]
+    CF --> M[("metrics.json")]
+    SUP --> M
+    UNS --> M
+    RD --> M
+    WAV[/"Measured WAV duration<br/>after the mix stage"/] --> CL["check_length"]
+    CL --> M
+```
+
 **Procedure** (`quality/`)
 
 1. Run `check_format()`. Record each format issue.
@@ -467,6 +710,24 @@ request stops the job at the next of these points.
 |---|---|
 | The script and the speakers | One PCM clip for each turn |
 | `PAPER2POD_VOICES` | The voice map in `metrics.json` (`voices`) |
+
+```mermaid
+flowchart TD
+    SP[/"Speakers and PAPER2POD_VOICES"/] --> PIN["Pinned voices first:<br/>override, then the speaker voice"]
+    PIN --> AUTO["Other speakers: first free voice<br/>of the same style, then neutral,<br/>then any free voice"]
+    AUTO --> CHK{"Unknown or<br/>duplicate voice?"}
+    CHK -- "yes" --> VE[/"ValueError"/]
+    CHK -- "no" --> TURN["For each turn"]
+    TURN --> CH["chunk_for_tts<br/>4,000 characters at sentence ends"]
+    CH --> KEY["SHA-256 of engine,<br/>sample rate, voice, text"]
+    KEY --> HIT{"data/cache/tts/key.pcm<br/>exists?"}
+    HIT -- "yes" --> READ["Read the PCM"]
+    HIT -- "no" --> SYN["tts.synthesize<br/>with retries"]
+    SYN --> SAVE[("Save the PCM<br/>through a .part file")]
+    SAVE --> JOIN
+    READ --> JOIN["Join the chunks<br/>into one clip"]
+    JOIN --> OUT[/"Clip with its segment number"/]
+```
 
 **Procedure** (`pipeline.py`, `audio/voices.py`, `audio/text.py`)
 
@@ -503,6 +764,24 @@ request stops the job at the next of these points.
 | The clips, with their segment numbers | `podcast.wav` (16-bit mono PCM) |
 | The segment titles and `PAPER2POD_PAUSE_MS` | `chapters.json`, optional `podcast.mp3`, and `metrics.json` |
 
+```mermaid
+flowchart TD
+    IN[/"Clips with segment numbers"/] --> NEW{"New segment?"}
+    NEW -- "yes" --> P2["Pause of 2 x PAPER2POD_PAUSE_MS<br/>except before the first clip"]
+    P2 --> CH["Chapter: title, start second"]
+    NEW -- "no" --> P1["Pause of PAPER2POD_PAUSE_MS"]
+    CH --> NORM["normalize_loudness<br/>-20 dBFS RMS, peak 0.95 or less"]
+    P1 --> NORM
+    NORM --> MORE{"More clips?"}
+    MORE -- "yes" --> NEW
+    MORE -- "no" --> WAV["write_wav<br/>16-bit mono"]
+    WAV --> DUR["wav_duration<br/>measured length"]
+    DUR --> MP3{"export_mp3 requested?"}
+    MP3 -- "yes" --> EXP["pydub export<br/>128 kbit/s"]
+    MP3 -- "no" --> OUT
+    EXP --> OUT[/"podcast.wav, podcast.mp3,<br/>chapters.json, metrics.json"/]
+```
+
 **Procedure** (`audio/mix.py`)
 
 1. Normalize each clip to −20 dBFS RMS. The gain never lets the peak go above 0.95 of full scale.
@@ -529,6 +808,23 @@ request stops the job at the next of these points.
 |---|---|
 | A `PodcastRequest` | A `Job` with an ID, a status, a stage, a progress value, a message, an error and outputs |
 | | `data/jobs/<job_id>/job.json` |
+
+```mermaid
+flowchart TD
+    REQ[/"PodcastRequest"/] --> V{"validate passes?"}
+    V -- "no" --> VE[/"ValueError, no job"/]
+    V -- "yes" --> CR["JobStore.create<br/>32-character hex ID, job.json queued"]
+    CR --> POOL["ThreadPoolExecutor<br/>PAPER2POD_MAX_WORKERS"]
+    POOL --> EXE["_execute: status running"]
+    EXE --> RUN["Pipeline.run<br/>progress writes job.json"]
+    RUN -- "result" --> OK[/"succeeded, outputs"/]
+    RUN -- "JobCancelled" --> CA[/"cancelled"/]
+    RUN -- "Paper2PodError<br/>or other error" --> FA[/"failed, error message"/]
+    CAN[/"cancel(job_id)"/] --> FLAG["Set the cancel event"]
+    FLAG --> Q{"Queued and the future<br/>can be cancelled?"}
+    Q -- "yes" --> CA
+    Q -- "no" --> RUN
+```
 
 **Procedure** (`JobRunner` and `JobStore` in `jobs.py`)
 
@@ -563,6 +859,23 @@ request stops the job at the next of these points.
 
 **Purpose.** Run paper2pod from a terminal (`cli.py`).
 
+```mermaid
+flowchart TD
+    M["main: parse the arguments,<br/>load .env, Settings.from_env"] --> CMD{"Command"}
+    CMD -- "search" --> S["build_source, search<br/>print ID, date, title"]
+    CMD -- "make" --> MK["Speaker.parse or default speakers,<br/>PodcastRequest.validate"]
+    CMD -- "demo" --> DM["backend fake,<br/>paper demo, offline source"]
+    CMD -- "serve" --> SV["uvicorn<br/>paper2pod.api:app_from_env"]
+    CMD -- "ui" --> UI["python -m streamlit run"]
+    MK --> RJ["_run_job: JobStore.create,<br/>status running, Pipeline.run"]
+    DM --> RJ
+    RJ -- "success" --> X0[/"JSON summary, exit 0"/]
+    RJ -- "Paper2PodError or ValueError" --> X1[/"failed, exit 1"/]
+    RJ -- "Ctrl+C" --> X130[/"cancelled, exit 130"/]
+    M -- "ConfigError or ValueError" --> X2[/"exit 2"/]
+    SV -- "no uvicorn" --> X1
+```
+
 | Command | Options | What it does |
 |---|---|---|
 | `paper2pod search <query>` | `-n` (default `5`) | Search arXiv and print the ID, the date and the title of each paper |
@@ -596,6 +909,26 @@ uses `Alex:host:female` and `Sam:expert:male`.
 
 **Purpose.** Give the job runner to other programs over HTTP (`api.py`, `[api]` extra).
 
+```mermaid
+flowchart LR
+    REQ[/"HTTP request"/] --> R{"Route"}
+    R -- "POST /jobs" --> BODY{"JobIn and<br/>PodcastRequest valid?"}
+    BODY -- "no" --> E422[/"422"/]
+    BODY -- "yes" --> SUB["runner.submit"] --> A202[/"202 and the job"/]
+    R -- "GET or POST /jobs/job_id/..." --> GJ{"store.get:<br/>job exists?"}
+    GJ -- "no" --> E404[/"404"/]
+    GJ -- "yes" --> KIND{"Path"}
+    KIND -- "status" --> JOB[/"Job as JSON"/]
+    KIND -- "cancel" --> CAN["runner.cancel"] --> JOB
+    KIND -- "audio" --> SUC{"succeeded?"}
+    SUC -- "no" --> E409[/"409"/]
+    SUC -- "yes" --> FILE[/"MP3 if it exists, else WAV"/]
+    KIND -- "script" --> SCR{"script in outputs?"}
+    SCR -- "no" --> E409
+    SCR -- "yes" --> SJ[/"script.json"/]
+    R -- "GET /papers/search" --> SE["source.search<br/>1 to 25 results"]
+```
+
 | Method and route | Result |
 |---|---|
 | `GET /health` | `{"status": "ok", "backend": ...}` |
@@ -617,6 +950,28 @@ uses `Alex:host:female` and `Sam:expert:male`.
 
 **Purpose.** Search papers, start jobs and listen to the result in a browser (`ui/streamlit_app.py`, `[ui]` extra).
 
+```mermaid
+flowchart TD
+    SB["Sidebar: offline toggle,<br/>length slider, speakers"] --> SVC["services(offline), cached<br/>build_runner, build_source"]
+    SVC -- "ConfigError" --> ERR[/"Error, stop"/]
+    SVC --> TABS{"Tab"}
+    TABS -- "Search" --> SR["source.search, 8 results"]
+    SR --> MAKE{{"HUMAN<br/>Click Make podcast"}}
+    MAKE --> SUB["runner.submit"]
+    TABS -- "Chat" --> CH["ChatSession.send"]
+    CH --> SUB
+    SUB --> IDS[("job_ids in st.session_state")]
+    TABS -- "Jobs" --> JP["job_panel, every 2 seconds<br/>runner.store.get"]
+    IDS --> JP
+    JP --> ST{"Status"}
+    ST -- "queued or running" --> PRG["Progress bar and Cancel"]
+    ST -- "succeeded" --> AUD[/"Play the WAV file"/]
+    ST -- "failed" --> FE[/"Error message"/]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class MAKE human
+```
+
 1. Use the sidebar toggle to select the offline demo or the real backend.
 2. Set the length with the slider (2 to 30 minutes, default 10).
 3. Write one speaker on each line, in the form `name:role:style[:voice]`.
@@ -629,6 +984,27 @@ Each browser session keeps its own job list and its own chat session in `st.sess
 ### 13.4 The chat session
 
 **Purpose.** Change short English requests into searches and jobs (`chat.py`).
+
+```mermaid
+flowchart TD
+    MSG[/"Message"/] --> MEM["memory.add user<br/>12 messages, 6,000 characters"]
+    MEM --> H{"Empty, help, hi, hello?"}
+    H -- "yes" --> HELP[/"Usage text"/]
+    H -- "no" --> ST{"status, progress, ready?"}
+    ST -- "yes" --> STA[/"Status of the last job"/]
+    ST -- "no" --> CA{"cancel, stop, abort?"}
+    CA -- "yes" --> CAN[/"runner.cancel on the last job"/]
+    CA -- "no" --> ID{"arXiv ID in the text?"}
+    ID -- "yes, podcast words<br/>or minutes" --> MK["Make with the ID"]
+    ID -- "yes, no podcast words" --> SE["Search"]
+    ID -- "no" --> CH{"Choice and podcast words?<br/>#2, first, last"}
+    CH -- "yes" --> MKC["Make with a result<br/>of the last search"]
+    CH -- "no" --> SE
+    MK --> SUB["runner.submit"]
+    MKC --> SUB
+    SE --> RES[/"5 numbered results"/]
+    SUB --> STARTED[/"Started job reply"/]
+```
 
 | Intent | Example request | Action |
 |---|---|---|
